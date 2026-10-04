@@ -6,7 +6,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-title" content="Face Fighter">
+<meta name="application-name" content="Face Fighter">
+<meta name="theme-color" content="#1a0b2e">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="manifest" href="manifest.json">
 <meta name="format-detection" content="telephone=no">
 <title>FACE FIGHTER</title>
 <style>
@@ -17,7 +22,13 @@
   *{-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}
   #safe{position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;
     padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
-  #wrap{position:fixed;left:0;top:0;width:960px;height:540px}
+  #wrap{position:fixed;left:0;top:0;width:100%;height:100%;background:#000}
+  #a2hs{position:fixed;z-index:20;left:50%;transform:translateX(-50%);top:calc(env(safe-area-inset-top,0px) + 6px);display:none;align-items:center;gap:8px;
+    background:rgba(20,8,40,.88);border:2px solid #ffd23f;border-radius:999px;padding:5px 6px 5px 14px;color:#fff;font:600 13px/1.2 -apple-system,Helvetica,Arial,sans-serif;
+    white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.5);pointer-events:auto}
+  #a2hs.on{display:flex}
+  #a2hs b{color:#ffd23f}
+  #a2hs button{width:26px;height:26px;border-radius:50%;border:0;background:#ffd23f;color:#2d1650;font:700 16px/26px Arial,sans-serif;padding:0;touch-action:manipulation}
   canvas{display:block;width:100%;height:100%;image-rendering:auto;background:#000;touch-action:none}
   #touch{position:fixed;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none;z-index:10}
   #touch.on{display:block}
@@ -53,6 +64,7 @@
 </div>
 <div id="touch"></div>
 <div id="safe"></div>
+<div id="a2hs" role="note"><span>For full screen: tap <b>Share</b> &rarr; <b>Add to Home Screen</b></span><button id="a2hsx" aria-label="Dismiss">&times;</button></div>
 <div id="rotate"><div class="ph"></div>ROTATE YOUR PHONE<br><span style="font-size:18px;color:#fff;font-family:Arial,sans-serif">Face Fighter plays in landscape</span></div>
 <script>
 "use strict";
@@ -68,15 +80,19 @@ const NAMES = [params.get("p1") || "Jay", params.get("p2") || "Ryan"];
 const DEMO = params.get("demo"); // "fight" | "damage" | "ko"
 
 // ===================== CANVAS / SCALING =====================
-const W = 960, H = 540, GROUND = 478;
+// W x H is the *design* stage (all layout + gameplay coordinates). The canvas is resized to the viewport's aspect:
+// on screens wider than 16:9 the visible stage widens symmetrically (view.vw logical units, view.ox extra on each side),
+// so the picture fills the whole screen with no black bars. World x stays 0..W in the middle; visible x is -ox .. W+ox.
+const W = 960, H = 540, GROUND = 478, MAX_VW = 1800;
 const cv = document.getElementById("c"), ctx = cv.getContext("2d");
 const DPR = Math.min(2, window.devicePixelRatio||1); cv.width = W*DPR; cv.height = H*DPR;
 const wrap = document.getElementById("wrap");
-// Phone-first layout: fit the 960x540 canvas inside the *visible* viewport minus safe-area insets (notch/home bar).
+// Phone-first layout: the canvas covers the whole visible viewport (under the notch/home bar too); HUD + buttons stay inside the safe area.
 // Recomputed on resize / orientationchange / visualViewport changes / fullscreenchange, plus a cheap per-frame size check.
 const safeEl = document.getElementById("safe"), rotateEl = document.getElementById("rotate");
 const SAFE_OVERRIDE = params.get("safe") ? params.get("safe").split(",").map(Number) : null; // test hook: ?safe=top,right,bottom,left
-const view = { w:0, h:0, x:0, y:0, sl:0, sr:0, st:0, sb:0, portrait:false, key:"" };
+const view = { w:0, h:0, x:0, y:0, sl:0, sr:0, st:0, sb:0, portrait:false, key:"",
+  vw:W, ox:0, sc:1, oy:0, gsl:0, gsr:0, gst:0, gsb:0 };   // vw/ox: visible logical width / side extension; sc: CSS px per logical unit; gs*: safe insets in logical units
 function readViewport(){
   const vv = window.visualViewport;
   let w = vv ? vv.width : innerWidth, h = vv ? vv.height : innerHeight;
@@ -92,11 +108,23 @@ function resize(){
   const v = readViewport(), s = readSafe();
   view.w = v.w; view.h = v.h; view.x = v.x; view.y = v.y; [view.st, view.sr, view.sb, view.sl] = s;
   view.portrait = v.h > v.w;
-  const aw = Math.max(1, v.w - s[1] - s[3]), ah = Math.max(1, v.h - s[0] - s[2]);
-  const sc = Math.min(aw / W, ah / H);
-  const cw = Math.floor(W*sc), ch = Math.floor(H*sc);
-  wrap.style.width = cw+"px"; wrap.style.height = ch+"px";
-  wrap.style.left = Math.round(v.x + s[3] + (aw-cw)/2)+"px"; wrap.style.top = Math.round(v.y + s[0] + (ah-ch)/2)+"px";
+  // logical height is always H (540); the logical width follows the viewport aspect (min 16:9, max MAX_VW)
+  let sc = v.h / H, vw = v.w / sc;
+  if(vw < W){ vw = W; sc = v.w / W; }            // narrower than 16:9 (tablets): fit width, small top/bottom margins
+  if(vw > MAX_VW){ vw = MAX_VW; sc = v.h / H; }  // absurdly wide: cap
+  vw = Math.round(vw);
+  const cw = Math.round(vw*sc), ch = Math.round(H*sc);
+  view.vw = vw; view.ox = (vw - W)/2; view.sc = sc;
+  view.oy = (v.h - ch)/2;
+  // safe-area insets converted to logical units (relative to the canvas edges)
+  const cl = (v.w - cw)/2;
+  view.gsl = Math.max(0, s[3]-cl)/sc; view.gsr = Math.max(0, s[1]-cl)/sc; view.gst = Math.max(0, s[0]-view.oy)/sc; view.gsb = Math.max(0, s[2]-view.oy)/sc;
+  const bw = Math.round(vw*DPR), bh = Math.round(H*DPR);
+  if(cv.width !== bw || cv.height !== bh){ cv.width = bw; cv.height = bh; }
+  wrap.style.width = v.w+"px"; wrap.style.height = v.h+"px"; wrap.style.left = v.x+"px"; wrap.style.top = v.y+"px";
+  cv.style.width = cw+"px"; cv.style.height = ch+"px"; cv.style.marginLeft = Math.round(cl)+"px"; cv.style.marginTop = Math.round(view.oy)+"px";
+  if(window.__bgReady) buildBg();
+  if(window.__uiReady) layoutUI();
   view.key = [innerWidth, innerHeight, v.w, v.h, s.join()].join("|");
   if(window.__touchReady) layoutTouch();
   if(rotateEl){
@@ -469,10 +497,10 @@ addEventListener("pointermove", e=>{ if(!ptrMap.has(e.pointerId)) return; const 
 ["pointerup","pointercancel"].forEach(ev=>addEventListener(ev, e=>{ if(ptrMap.delete(e.pointerId)) syncTouch(); }, true));
 function showPads(on){ if(on){ buildPads(); touchEl.classList.add("on"); } else { touchEl.classList.remove("on"); releaseAllTouches(); } }
 window.__touchReady = true;
-function canvasPoint(e){ const r = cv.getBoundingClientRect(); return { x:(e.clientX-r.left)*W/r.width, y:(e.clientY-r.top)*H/r.height }; }
-// UI taps go to the canvas *and* the empty areas around it (letterbox bars), mapped into game coordinates
+function canvasPoint(e){ const r = cv.getBoundingClientRect(); return { x:(e.clientX-r.left)*view.vw/r.width - view.ox, y:(e.clientY-r.top)*H/r.height }; }
+// UI taps anywhere on screen, mapped into design coordinates (x may be <0 or >W on wide screens)
 addEventListener("pointerdown", e=>{
-  if(e.target.closest && (e.target.closest("#touch .tb") || e.target.closest("#pwlock") || e.target.closest("#rotate"))) return;
+  if(e.target.closest && (e.target.closest("#touch .tb") || e.target.closest("#pwlock") || e.target.closest("#rotate") || e.target.closest("#a2hs"))) return;
   audio(); const p = canvasPoint(e); onPointer(p.x, p.y);
 });
 
@@ -607,9 +635,9 @@ class Fighter{
       this.y = GROUND; this.vy = 0;
       if(this.state==="jump") this.setState("idle");
     }
-    this.x = Math.max(50, Math.min(W-50, this.x));
-    if(this.state==="ko"){ const hx = this.x - this.facing*275; // keep the knocked-out head on screen
-      if(hx < 70) this.x += 70-hx; if(hx > W-70) this.x -= hx-(W-70); }
+    this.x = Math.max(stageL()+50, Math.min(stageR()-50, this.x));
+    if(this.state==="ko"){ const hx = this.x - this.facing*275, l = stageL()+70, r = stageR()-70; // keep the knocked-out head on screen
+      if(hx < l) this.x += l-hx; if(hx > r) this.x -= hx-r; }
     this.prevIn = Object.assign({}, inp);
   }
   setState(s){ if(this.state!==s){ this.state = s; this.stateT = 0; } }
@@ -1099,6 +1127,13 @@ function toSelect(){ game.scene="select"; game.paused=false; game.selSel = game.
 const SEL_BOX = [ {x:70,y:82,w:390,h:430}, {x:500,y:82,w:390,h:430} ];
 const FIGHT_BOX = {x:300,y:338,w:360,h:76};
 const UI_BTNS = { sound:{x:16,y:12,w:150,h:40}, music:{x:W-166,y:12,w:150,h:40} };
+// visible / playable stage edges in design coordinates (inside the safe area)
+function edgeL(){ return -view.ox + view.gsl; }
+function edgeR(){ return W + view.ox - view.gsr; }
+function stageL(){ return Math.min(0, edgeL()); }
+function stageR(){ return Math.max(W, edgeR()); }
+function layoutUI(){ UI_BTNS.sound.x = edgeL()+16; UI_BTNS.music.x = edgeR()-166; UI_BTNS.sound.y = UI_BTNS.music.y = view.gst+12; }
+window.__uiReady = true; layoutUI();
 const inBox = (b,x,y)=> x>b.x && x<b.x+b.w && y>b.y && y<b.y+b.h;
 function soundBtns(x,y){
   if(inBox(UI_BTNS.sound,x,y)){ muted = !muted; return true; }
@@ -1168,7 +1203,7 @@ function update(){
   if(Math.abs(dx) < minD && Math.abs(a.y-b.y) < 120 && a.state!=="ko" && b.state!=="ko"){
     const push = (minD - Math.abs(dx))/2 * (Math.sign(dx)||1);
     a.x -= push; b.x += push;
-    a.x = Math.max(50,Math.min(W-50,a.x)); b.x = Math.max(50,Math.min(W-50,b.x));
+    a.x = Math.max(stageL()+50,Math.min(stageR()-50,a.x)); b.x = Math.max(stageL()+50,Math.min(stageR()-50,b.x));
   }
   stepFx();
 }
@@ -1185,7 +1220,7 @@ function stepProjectiles(){
       return false;                                                     // plunger sticks to the face (drawn on the head)
     }
     if(p.y >= GROUND-8 && p.g){ p.y = GROUND-8; p.vy *= -0.4; p.vx *= 0.6; if(Math.abs(p.vy)<1.5) p.dead = true; p.life = Math.min(p.life,40); }
-    return p.life>0 && p.x>-80 && p.x<W+80;
+    return p.life>0 && p.x>-view.ox-80 && p.x<W+view.ox+80;
   });
 }
 function drawProjectiles(c){
@@ -1203,9 +1238,11 @@ function stepFx(){
 }
 
 // ===================== RENDER =====================
-const bgCanvas = document.createElement("canvas"); bgCanvas.width=W; bgCanvas.height=H;
-(function buildBg(){
-  const c = bgCanvas.getContext("2d");
+const bgCanvas = document.createElement("canvas"); bgCanvas.height=H;
+let bgW = 0;
+function buildBg(){
+  const W = Math.ceil(view.vw) + 24; if(W === bgW) return; bgW = W;   // local W = width of the visible stage (+ shake margin)
+  bgCanvas.width = W; const c = bgCanvas.getContext("2d");
   const g = c.createLinearGradient(0,0,0,GROUND); g.addColorStop(0,"#1b0f3a"); g.addColorStop(0.55,"#d0457a"); g.addColorStop(1,"#ffb347");
   c.fillStyle=g; c.fillRect(0,0,W,H);
   c.fillStyle="rgba(255,240,180,.9)"; c.beginPath(); c.arc(W/2,GROUND-120,90,0,Math.PI*2); c.fill();
@@ -1225,10 +1262,14 @@ const bgCanvas = document.createElement("canvas"); bgCanvas.width=W; bgCanvas.he
   const fg = c.createLinearGradient(0,GROUND,0,H); fg.addColorStop(0,"#8a5a3c"); fg.addColorStop(1,"#4a2c1c");
   c.fillStyle=fg; c.fillRect(0,GROUND,W,H-GROUND);
   c.strokeStyle="rgba(0,0,0,.25)"; c.lineWidth=2;
-  for(let i=-10;i<=10;i++){ c.beginPath(); c.moveTo(W/2+i*40,GROUND); c.lineTo(W/2+i*130,H); c.stroke(); }
+  for(let i=-Math.ceil(W/80);i<=Math.ceil(W/80);i++){ c.beginPath(); c.moveTo(W/2+i*40,GROUND); c.lineTo(W/2+i*130,H); c.stroke(); }
   for(let y=GROUND+12;y<H;y+=y/24){ c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
   c.fillStyle="rgba(255,255,255,.15)"; c.fillRect(0,GROUND,W,3);
-})();
+}
+window.__bgReady = true; buildBg();
+// draw the background covering the whole visible stage
+function drawBg(c){ c.drawImage(bgCanvas, -view.ox-12, 0); }
+function dim(c, a){ c.fillStyle=`rgba(0,0,0,${a})`; c.fillRect(-view.ox-12,-12,view.vw+24,H+24); }
 
 function txt(c,s,x,y,size,fill="#fff",stroke="#000",align="center",lw){
   c.font = `${size}px Impact, "Arial Black", sans-serif`; c.textAlign=align; c.textBaseline="middle";
@@ -1241,9 +1282,9 @@ function faceIcon(c,i,x,y,r){
 }
 function drawHUD(c){
   const [a,b] = game.fighters;
-  const bw = 360, bh = 26, y = 24;
+  const bw = 360, bh = 26, y = 24 + view.gst, EL = edgeL(), ER = edgeR();
   [a,b].forEach((f,i)=>{
-    const x = i===0 ? 70 : W-70-bw;
+    const x = i===0 ? EL+70 : ER-70-bw;
     c.fillStyle="#000"; c.fillRect(x-4,y-4,bw+8,bh+8);
     c.fillStyle="#5a0d0d"; c.fillRect(x,y,bw,bh);
     const dw = bw*Math.max(0,f.dispHp)/100, hw = bw*Math.max(0,f.hp)/100;
@@ -1253,7 +1294,7 @@ function drawHUD(c){
     g.addColorStop(0,hc[0]); g.addColorStop(1,hc[1]); c.fillStyle=g;
     if(i===0) c.fillRect(x+bw-hw,y,hw,bh); else c.fillRect(x,y,hw,bh);
     c.strokeStyle="#fff"; c.lineWidth=2; c.strokeRect(x,y,bw,bh);
-    faceIcon(c,i, i===0?36:W-36, y+bh/2+4, 28);
+    faceIcon(c,i, i===0?EL+36:ER-36, y+bh/2+4, 28);
     txt(c, f.name.toUpperCase(), i===0?x:x+bw, y+bh+20, 22, "#fff", "#000", i===0?"left":"right");
     { const you = i===game.human, nw = (c.measureText(f.name.toUpperCase()).width), tx = i===0 ? x+nw+40 : x+bw-nw-40;
       c.fillStyle = you ? "#3fd16b" : "#555"; c.strokeStyle="#fff"; c.lineWidth=2;
@@ -1268,12 +1309,12 @@ function drawHUD(c){
     const meters = [[f.i===0?"PLUNGER":"BEER CAN", 1 - f.cdSpecial/PROJ[f.i===0?"plunger":"can"].cd, "#ffd23f"]];
     if(f.i===1) meters.push(["SHOTGUN", 1 - f.cdSuper/SUPER_CD, "#ff9df5"]);
     meters.forEach(([s,v,col],k)=>{
-      const mw = 86, x0 = i===0 ? 70 + 360 - mw - 60 - k*(mw+8) : W-70-360+52+k*(mw+8), y0 = y+bh+12;
+      const mw = 86, x0 = i===0 ? EL+70 + 360 - mw - 60 - k*(mw+8) : ER-70-360+52+k*(mw+8), y0 = y+bh+12;
       c.fillStyle="rgba(0,0,0,.65)"; c.fillRect(x0-2,y0-2,mw+4,18);
       c.fillStyle = v>=1 ? col : "rgba(255,255,255,.35)"; c.fillRect(x0,y0,mw*Math.max(0,Math.min(1,v)),14);
       txt(c, v>=1 ? s+"!" : s, x0+mw/2, y0+7.5, 11, v>=1?"#000":"#fff", v>=1?"#fff":"#000", undefined, 2.5);
     });
-    if(f.buff>0) txt(c,"MILLER TIME x1.3", i===0?70+180:W-70-180, y+bh+44, 14, "#ffe48a");
+    if(f.buff>0) txt(c,"MILLER TIME x1.3", i===0?EL+70+180:ER-70-180, y+bh+44, 14, "#ffe48a");
   });
   // pause button (tap target is the whole timer column)
   c.fillStyle="rgba(0,0,0,.55)"; c.fillRect(PAUSE_BTN.x,PAUSE_BTN.y,PAUSE_BTN.w,PAUSE_BTN.h); c.strokeStyle="#ffd23f"; c.lineWidth=2; c.strokeRect(PAUSE_BTN.x,PAUSE_BTN.y,PAUSE_BTN.w,PAUSE_BTN.h);
@@ -1304,12 +1345,11 @@ function drawFx(c){
   }
 }
 function drawTitle(c){
-  c.drawImage(bgCanvas,0,0);
-  c.fillStyle="rgba(0,0,0,.45)"; c.fillRect(0,0,W,H);
+  drawBg(c); dim(c,.45);
   const t = game.time;
   // big faces facing off
   [0,1].forEach(i=>{
-    const img = faces[i].img, x = i===0? 170 : W-170, y = 250 + Math.sin(t*0.05+i*2)*8, s = 1.25;
+    const spread = Math.min(view.ox*0.6, 160), img = faces[i].img, x = i===0? 170-spread : W-170+spread, y = 250 + Math.sin(t*0.05+i*2)*8, s = 1.25;
     c.save(); c.translate(x,y); c.rotate((i?-1:1)*0.08 + Math.sin(t*0.04+i)*0.03);
     c.fillStyle="#000"; c.beginPath(); c.ellipse(0,0,100*s/1.6+4,150*s/1.6+4,0,0,Math.PI*2); c.fill();
     c.drawImage(img,-100*s/1.6,-150*s/1.6,200*s/1.6,300*s/1.6); c.restore();
@@ -1334,7 +1374,7 @@ function drawTitle(c){
   drawSoundBtns(c);
 }
 function drawSelect(c){
-  c.drawImage(bgCanvas,0,0); c.fillStyle="rgba(0,0,0,.5)"; c.fillRect(0,0,W,H);
+  drawBg(c); dim(c,.5);
   if(!game.previews){ game.previews = [new Fighter(0), new Fighter(1)]; game.previews[0].x = SEL_BOX[0].x+SEL_BOX[0].w/2; game.previews[1].x = SEL_BOX[1].x+SEL_BOX[1].w/2; }
   txt(c,"CHOOSE YOUR FIGHTER",W/2,44,44,"#ffeb3b","#b0101a",undefined,8);
   const info = [ ["JAY","THE PLUMBER","WRENCH swing · PLUNGER! special","#8ab8ff"], ["RYAN","THE BEER GUY","BEER CAN special · SHOTGUN! super (heals)","#ff8ae6"] ];
@@ -1355,13 +1395,14 @@ function drawSelect(c){
 }
 function render(){
   const c = ctx;
-  c.setTransform(DPR,0,0,DPR,0,0);
-  if(!faces[1]){ c.fillStyle="#000"; c.fillRect(0,0,W,H); txt(c,"LOADING…",W/2,H/2,40); return; }
+  const T0 = ()=>c.setTransform(DPR,0,0,DPR,view.ox*DPR,0);   // design space, centred in the (possibly wider) visible stage
+  T0();
+  if(!faces[1]){ dim(c,1); txt(c,"LOADING…",W/2,H/2,40); return; }
   if(game.scene==="title"){ drawTitle(c); return; }
   if(game.scene==="select"){ drawSelect(c); return; }
   const sx = game.shake ? (Math.random()-0.5)*game.shake*2 : 0, sy = game.shake ? (Math.random()-0.5)*game.shake*2 : 0;
   c.translate(sx,sy);
-  c.drawImage(bgCanvas,-10,-10,W+20,H+20);
+  c.drawImage(bgCanvas,-view.ox-12,-10,bgCanvas.width,H+20);
   const [a,b] = game.fighters;
   // draw KO'd/hit fighter behind
   const order = (b.state==="ko"||b.state==="hit") ? [b,a] : [a,b];
@@ -1373,7 +1414,7 @@ function render(){
     txt(c,"YOU",mx,my-12,game.phase==="intro"?24:16,"#3fd16b","#000"); c.globalAlpha = 1; } }
   drawProjectiles(c);
   drawFx(c);
-  c.setTransform(DPR,0,0,DPR,0,0);
+  T0();
   drawHUD(c);
   if(game.scene==="game" && game.banner){
     const t = game.bannerT, sc = game.banner==="K.O.!" ? Math.min(1.4, 0.3+t*0.06) : Math.min(1,0.3+ (t%70)*0.08);
@@ -1386,7 +1427,7 @@ function render(){
     }
   }
   if(game.paused){
-    c.fillStyle="rgba(0,0,0,.6)"; c.fillRect(0,0,W,H);
+    dim(c,.6);
     txt(c,"PAUSED",W/2,H/2-80,80,"#ffeb3b");
     [["resume","RESUME","#ffd23f","#b0101a"],["quit","QUIT TO MENU","rgba(0,0,0,.7)","#fff"]].forEach(([k,s,bg,fg])=>{ const b = PAUSE_UI[k];
       c.fillStyle=bg; c.strokeStyle="#fff"; c.lineWidth=3; c.beginPath(); c.roundRect ? c.roundRect(b.x,b.y,b.w,b.h,12) : c.rect(b.x,b.y,b.w,b.h); c.fill(); c.stroke();
@@ -1396,7 +1437,7 @@ function render(){
   }
   if(game.scene==="over"){
     const t = game.endT, al = Math.min(0.55, t/60);
-    c.fillStyle=`rgba(0,0,0,${al})`; c.fillRect(0,0,W,H);
+    dim(c,al);
     const w = game.matchWinner;
     const sc = Math.min(1, 0.2+t*0.05);
     c.save(); c.translate(W/2,190); c.scale(sc,sc);
@@ -1416,12 +1457,25 @@ let last = performance.now(), acc = 0, loopN = 0;
 function loop(now){
   acc += Math.min(100, now-last); last = now;
   while(acc >= 1000/60){ update(); acc -= 1000/60; }
-  render();
+  render(); syncHint();
   if((++loopN % 15)===0) checkViewport();
   if(loopN % 6===0 && game.scene==="game") touchBtns.forEach(bt=>{ const f = game.fighters[game.human]; if(!f) return;
     if(bt.k==="special") bt.el.classList.toggle("cool", f.cdSpecial>0); if(bt.k==="super") bt.el.classList.toggle("cool", f.cdSuper>0); });   // catches address-bar show/hide or rotations that fire no event
   requestAnimationFrame(loop);
 }
+// ---- iOS Safari (not launched from the home screen): hint how to get real full screen ----
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform==="MacIntel" && navigator.maxTouchPoints>1);
+const STANDALONE = navigator.standalone===true || (window.matchMedia && (matchMedia("(display-mode: standalone)").matches || matchMedia("(display-mode: fullscreen)").matches));
+const a2hsEl = document.getElementById("a2hs");
+let a2hsOff = !IS_IOS || STANDALONE || params.get("nohint")==="1";
+try{ if(sessionStorage.getItem("ff_a2hs_off")) a2hsOff = true; }catch(e){}
+document.getElementById("a2hsx").addEventListener("click", e=>{ e.preventDefault(); e.stopPropagation(); a2hsOff = true; try{ sessionStorage.setItem("ff_a2hs_off","1"); }catch(_){} syncHint(); });
+a2hsEl.addEventListener("pointerdown", e=>e.stopPropagation());
+function syncHint(){ const on = !a2hsOff && game.scene==="title" && !view.portrait; if(a2hsEl.classList.contains("on")!==on) a2hsEl.classList.toggle("on", on); }
+// test hook: client rects (CSS px) of the HUD's outermost elements
+window.__hudBounds = ()=>{ const r = cv.getBoundingClientRect(), k = r.width/view.vw, X = x=>r.left+(x+view.ox)*k, Y = y=>r.top+y*k;
+  return { left:X(edgeL()+36-28), right:X(edgeR()-36+28), top:Y(view.gst+24-4), bottom:Y(view.gst+24+26+44),
+           sound:[X(UI_BTNS.sound.x),Y(UI_BTNS.sound.y),X(UI_BTNS.sound.x+150),Y(UI_BTNS.sound.y+40)], music:[X(UI_BTNS.music.x),Y(UI_BTNS.music.y),X(UI_BTNS.music.x+150),Y(UI_BTNS.music.y+40)] }; };
 window.__game = game; window.__errors = [];
 loadFaces(()=>{
   if(DEMO){
